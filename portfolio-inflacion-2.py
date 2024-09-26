@@ -8,7 +8,7 @@ import logging
 import re
 
 # ------------------------------
-# Setup logging
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -26,53 +26,80 @@ inflation_rates = {
 }
 
 # ------------------------------
-# Diccionario de tickers y sus divisores (se puede ajustar si necesario)
+# Diccionario de tickers y sus divisores (se puede ajustar si es necesario)
 splits = {
   'AGRO.BA': (6, 2.1)  # Ajustes para AGRO.BA
-  # Add more tickers with splits if necessary
+  # Añade más tickers con splits si es necesario
 }
 
 # ------------------------------
 # Función para ajustar precios por splits
 def ajustar_precios_por_splits(df, ticker):
   try:
-      if ticker == 'AGRO.BA':
-          split_date = datetime(2023, 11, 3)
-          df.loc[df['Date'] < split_date, 'Close'] /= splits[ticker][0]
-          df.loc[df['Date'] >= split_date, 'Close'] *= splits[ticker][1]
+      if ticker in splits:
+          split_info = splits[ticker]
+          split_date = datetime(2023, 11, 3)  # Fecha de split específica para AGRO.BA
+          df.loc[df['Date'] < split_date, 'Close'] /= split_info[0]
+          df.loc[df['Date'] >= split_date, 'Close'] *= split_info[1]
+          logger.info(f"Ajuste por split aplicado al ticker {ticker}")
   except Exception as e:
       logger.error(f"Error ajustando splits para {ticker}: {e}")
   return df
 
 # ------------------------------
 # Función para calcular inflación diaria acumulada dentro de un rango de fechas
-def calcular_inflacion_diaria_rango(df_dates):
-  cumulative_inflation = pd.Series(1.0, index=df_dates)
-  for idx, current_date in enumerate(df_dates):
-      year = current_date.year
-      month = current_date.month
-      if year in inflation_rates:
-          monthly_rate = inflation_rates[year][month - 1]
-          daily_rate = (1 + monthly_rate / 100) ** (1 / 30) - 1  # Approximation
-          if idx == 0:
-              cumulative_inflation.iloc[idx] = 1.0
+def calcular_inflacion_diaria_rango(df, start_year, start_month, end_year, end_month):
+  cumulative_inflation = [1.0]  # Inicia con 1.0 para no alterar los valores
+
+  try:
+      for year in range(start_year, end_year + 1):
+          if year not in inflation_rates:
+              logger.warning(f"Tasa de inflación no disponible para el año {year}. Se omitirá.")
+              continue
+
+          monthly_inflation = inflation_rates[year]
+
+          # Define el rango de meses para el año actual
+          if year == start_year:
+              months = range(start_month - 1, 12)  # Desde el mes de inicio hasta diciembre
+          elif year == end_year:
+              months = range(0, end_month)  # Desde enero hasta el mes final
           else:
-              cumulative_inflation.iloc[idx] = cumulative_inflation.iloc[idx - 1] * (1 + daily_rate)
-  return cumulative_inflation
+              months = range(0, 12)  # Año completo
+
+          for month in months:
+              # Filtrar los días que pertenecen al mes actual
+              days_in_month_mask = (df['Date'].dt.year == year) & (df['Date'].dt.month == (month + 1))
+              num_days = days_in_month_mask.sum()
+              if num_days > 0:
+                  monthly_rate = monthly_inflation[month]
+                  # Calcular la tasa diaria
+                  daily_rate = (1 + monthly_rate / 100) ** (1 / num_days) - 1
+                  logger.debug(f"Año: {year}, Mes: {month+1}, Tasa Mensual: {monthly_rate}%, Tasa Diaria: {daily_rate:.6f}")
+                  # Aplicar la tasa diaria para cada día
+                  for _ in range(num_days):
+                      cumulative_inflation.append(cumulative_inflation[-1] * (1 + daily_rate))
+  except Exception as e:
+      logger.error(f"Error calculando inflación: {e}")
+
+  logger.info(f"Cálculo de inflación completado. Total de días calculados: {len(cumulative_inflation)-1}")
+  return cumulative_inflation[1:]  # Remover el valor inicial de 1.0
 
 # ------------------------------
-# Caching functions to optimize performance
-@st.cache_data(ttl=86400)  # Cache data for one day
+# Funciones de caché para optimizar rendimiento
+@st.cache_data(ttl=86400)  # Cache de un día
 def descargar_datos(ticker, start, end):
   stock_data = yf.download(ticker, start=start, end=end)
   if not stock_data.empty:
       stock_data.reset_index(inplace=True)
       stock_data = ajustar_precios_por_splits(stock_data, ticker)
       stock_data = stock_data[['Date', 'Close']].rename(columns={'Close': ticker})
+  else:
+      logger.warning(f"No se encontraron datos para el ticker {ticker} en el rango {start} - {end}.")
   return stock_data
 
 # ------------------------------
-# Streamlit UI
+# Interfaz de Usuario con Streamlit
 st.title("Simulador de Portafolio con Transacciones y Comparación con Inflación")
 
 st.markdown("""
@@ -135,10 +162,8 @@ else:
   start_date = df_transactions['Date'].min()
   end_date = df_transactions['Date'].max()
 
-  # Descargar datos para todos tickers involucrados
+  # Descargar datos para todos los tickers involucrados
   tickers = df_transactions['Ticker'].unique().tolist()
-  if 'AGRO.BA' not in tickers:
-      tickers.append('AGRO.BA')  # Ensure AGRO.BA is fetched if involved in splits
 
   data_frames = []
   for ticker in tickers:
@@ -184,9 +209,23 @@ else:
           df_merged['Date'] = pd.to_datetime(df_merged['Date'])
           df_merged.set_index('Date', inplace=True)
           all_dates = df_merged.index
-          cumulative_inflation = calcular_inflacion_diaria_rango(all_dates)
 
-          for current_date in all_dates:
+          # Determinar años y meses para el cálculo de inflación
+          start_year = start_date.year
+          start_month = start_date.month
+          end_year = end_date.year
+          end_month = end_date.month
+
+          # Calcular inflación diaria acumulada
+          cumulative_inflation = calcular_inflacion_diaria_rango(df_merged.reset_index(), start_year, start_month, end_year, end_month)
+
+          # Verificar que el número de días coincide
+          if len(cumulative_inflation) != len(df_merged):
+              st.warning("Desajuste en el cálculo de inflación para el rango de fechas seleccionado.")
+              logger.warning(f"Largo de inflación: {len(cumulative_inflation)}, Largo de datos: {len(df_merged)}")
+
+          # Iterar sobre todas las fechas y calcular el valor del portafolio
+          for idx, current_date in enumerate(all_dates):
               # Actualizar holdings si hay transacciones en esta fecha
               if current_date in portfolio:
                   for ticker, qty_change in portfolio[current_date].items():
@@ -205,14 +244,14 @@ else:
           df_result = pd.DataFrame({
               'Date': all_dates,
               'Portfolio_Value': portfolio_values,
-              'Inflacion_Acumulada': cumulative_inflation.values
+              'Inflacion_Acumulada': cumulative_inflation
           })
 
-          # Normalizar Inflacion_Acumulada to start at initial portfolio value
+          # Normalizar Inflacion_Acumulada para comenzar en el valor inicial del portafolio
           initial_portfolio = df_result['Portfolio_Value'].iloc[0]
           df_result['Inflacion_Index'] = initial_portfolio * df_result['Inflacion_Acumulada']
 
-          # Plotting
+          # Plotting con Plotly
           fig = go.Figure()
           fig.add_trace(go.Scatter(x=df_result['Date'], y=df_result['Portfolio_Value'],
                                    name='Portafolio', mode='lines', line=dict(color='blue')))
