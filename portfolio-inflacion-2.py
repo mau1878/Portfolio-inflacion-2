@@ -156,12 +156,8 @@ st.subheader("Lista de Transacciones")
 st.dataframe(df_transactions)
 
 if df_transactions.empty:
-    st.warning("No hay transacciones definidas.")
+    st.warning("No se han ingresado transacciones.")
 else:
-    # Determinar fechas de inicio y fin
-    start_date = df_transactions['Date'].min()
-    end_date = df_transactions['Date'].max() + pd.Timedelta(days=1)
-
     # Simulación del portafolio
     portfolio = {}
     tickers = df_transactions['Ticker'].unique()
@@ -182,5 +178,8 @@ else:
         elif action == 'Retirar':
             portfolio[txn_date][ticker] = portfolio[txn_date].get(ticker, 0) - quantity
 
+    # Convertir las fechas en el portafolio a cadenas (JSON serializable)
+    portfolio_serializable = {str(date): tickers for date, tickers in portfolio.items()}
+
     st.write("Simulación del portafolio completada.")
-    st.json(portfolio)
+    st.json(portfolio_serializable)
