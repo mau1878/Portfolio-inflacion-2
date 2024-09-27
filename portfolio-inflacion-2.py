@@ -22,14 +22,15 @@ inflation_rates = {
   2021: [4.0, 3.6, 4.8, 4.1, 3.3, 3.2, 3.0, 2.5, 3.5, 3.5, 2.5, 3.8],
   2022: [3.9, 4.7, 6.7, 6.0, 5.1, 5.3, 7.4, 7.0, 6.2, 6.3, 4.9, 5.1],
   2023: [6.0, 6.6, 7.7, 8.4, 7.8, 6.0, 6.3, 12.4, 12.7, 8.3, 12.8, 25.5],
-  2024: [20.6, 13.2, 11.0, 9.2, 4.2, 4.6, 4.2, 3.5, 3.5, 3.3, 3.6, 3.3]  # Estimación ficticia
+  2024: [20.6, 13.2, 11.0, 9.2, 4.2, 4.6, 4.2, 3.5, 3.5, 3.3, 3.6, 3.3]
+  # Añade las tasas de inflación estimadas para 2024 en adelante si es necesario
 }
 
 # ------------------------------
 # Diccionario de tickers y sus divisores (se puede ajustar si es necesario)
 splits = {
   'AGRO.BA': (6, 2.1)  # Ajustes para AGRO.BA
-  # Añade más tickers con splits si necesario
+  # Añade más tickers con splits si es necesario
 }
 
 # ------------------------------
@@ -62,7 +63,7 @@ def calcular_inflacion_diaria_rango(df):
       if year in inflation_rates:
           monthly_rate = inflation_rates[year][month -1]
           # Get number of days in the month
-          num_days = dates[(years == year) & (months == month)].shape[0]
+          num_days = dates[(years == year) & (months == month)].nunique()
           # Calculate daily rate
           daily_rate = (1 + monthly_rate / 100) ** (1 / num_days) - 1
           daily_inflation.append(daily_rate)
@@ -143,7 +144,9 @@ if submit_button:
 if 'transaction_list' not in st.session_state:
   st.session_state.transaction_list = transaction_list
 else:
-  st.session_state.transaction_list = transaction_list
+  # Solo actualizar si el usuario ha presionado el botón
+  if submit_button:
+      st.session_state.transaction_list = transaction_list
 
 df_transactions = pd.DataFrame(st.session_state.transaction_list)
 df_transactions.sort_values('Date', inplace=True)
@@ -202,7 +205,7 @@ else:
           portfolio_values = []
 
           # Resetear el índice a 'Date' para fácil iteración
-          df_merged.reset_index(inplace=True)
+          df_merged.reset_index(drop=True, inplace=True)
           all_dates = df_merged['Date']
 
           # Calcular inflación acumulada
@@ -212,10 +215,11 @@ else:
           df_merged['Inflacion_Acumulada'] = cumulative_inflation
 
           # Simular el portafolio y calcular valor diario
-          for idx, current_date in enumerate(all_dates):
+          for idx, current_date in df_merged.iterrows():
+              date = current_date['Date']
               # Actualizar holdings si hay transacciones en esta fecha
-              if current_date in portfolio_transactions:
-                  for ticker, qty_change in portfolio_transactions[current_date].items():
+              if date in portfolio_transactions:
+                  for ticker, qty_change in portfolio_transactions[date].items():
                       holdings[ticker] = holdings.get(ticker, 0) + qty_change
                       if holdings[ticker] <= 0:
                           del holdings[ticker]
@@ -223,8 +227,10 @@ else:
               # Calcular el valor del portafolio actual
               total_value = 0
               for ticker, qty in holdings.items():
-                  price = current_date[ticker] if ticker in current_date and not pd.isna(current_date[ticker]) else 0
-                  total_value += price * qty
+                  if ticker in df_merged.columns:
+                      price = df_merged.at[idx, ticker]
+                      if not pd.isna(price):
+                          total_value += price * qty
               portfolio_values.append(total_value)
 
           # Agregar 'Portfolio_Value' al DataFrame
@@ -235,21 +241,17 @@ else:
           if pd.isna(first_investment_idx):
               st.warning("No hay ninguna transacción que agregue holdings.")
               st.stop()
-          
+
           # Set 'Inflacion_Index' to start at 1 on first investment date
           df_merged['Inflacion_Index'] = np.nan
-          df_merged.loc[first_investment_idx, 'Inflacion_Index'] = 1.0
+          df_merged.at[first_investment_idx, 'Inflacion_Index'] = 1.0
 
           # Calculate 'Inflacion_Index' from first_investment_idx onwards
-          for idx in range(first_investment_idx +1, len(df_merged)):
-              previous_inflation = df_merged.at[idx -1, 'Inflacion_Index']
-              if not pd.isna(previous_inflation):
-                  # Current day cumulative_inflation / cumulative_inflation on first_investment_date
-                  infl_change = df_merged.at[idx, 'Inflacion_Acumulada'] / df_merged.at[first_investment_idx, 'Inflacion_Acumulada']
-                  df_merged.at[idx, 'Inflacion_Index'] = infl_change
-
-          # Normalizar Inflacion_Index para empezar en 1
-          df_merged.loc[first_investment_idx:, 'Inflacion_Index'] = df_merged.loc[first_investment_idx:, 'Inflacion_Index'].fillna(method='ffill')
+          for idx in range(first_investment_idx + 1, len(df_merged)):
+              previous_inflation = df_merged.at[idx - 1, 'Inflacion_Index']
+              # Inflación relativa al día anterior
+              daily_inflation = df_merged.at[idx, 'Inflacion_Acumulada'] / df_merged.at[idx - 1, 'Inflacion_Acumulada']
+              df_merged.at[idx, 'Inflacion_Index'] = previous_inflation * daily_inflation
 
           # Escalar 'Inflacion_Index' para que coincida con el valor inicial del portafolio
           initial_portfolio_value = df_merged.at[first_investment_idx, 'Portfolio_Value']
@@ -296,5 +298,6 @@ else:
 
       except Exception as e:
           st.error(f"Ocurrió un error durante la simulación: {e}")
+          logger.error(f"Ocurrió un error durante la simulación: {e}")
   else:
       st.warning("No se pudieron descargar los datos necesarios para la simulación.")
