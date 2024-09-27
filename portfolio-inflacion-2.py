@@ -158,43 +158,29 @@ st.dataframe(df_transactions)
 if df_transactions.empty:
     st.warning("No hay transacciones definidas.")
 else:
-    # Determinar el rango de fechas
+    # Determinar fechas de inicio y fin
     start_date = df_transactions['Date'].min()
-    end_date = df_transactions['Date'].max()
+    end_date = df_transactions['Date'].max() + pd.Timedelta(days=1)
 
-    # Descargar datos para todos los tickers involucrados
-    tickers = df_transactions['Ticker'].unique().tolist()
+    # Simulación del portafolio
+    portfolio = {}
+    tickers = df_transactions['Ticker'].unique()
 
-    data_frames = []
-    for ticker in tickers:
-        try:
-            stock_data = descargar_datos(ticker, start_date, end_date + pd.Timedelta(days=1))
-            if not stock_data.empty:
-                data_frames.append(stock_data)
-            else:
-                st.warning(f"No se encontraron datos para {ticker} en el rango de fechas especificado.")
-        except Exception as e:
-            st.error(f"Error al descargar datos para {ticker}: {e}")
+    for txn_date, txn_row in df_transactions.iterrows():
+        txn_date = txn_row['Date']
+        ticker = txn_row['Ticker']
+        action = txn_row['Action']
+        quantity = txn_row['Quantity']
 
-    if data_frames:
-        try:
-            # Merge todos los dataframes en uno solo
-            df_merged = data_frames[0]
-            for df in data_frames[1:]:
-                df_merged = pd.merge(df_merged, df, on='Date', how='outer')
+        # Si no existe la fecha, inicializarla
+        if txn_date not in portfolio:
+            portfolio[txn_date] = {}
 
-            df_merged.sort_values('Date', inplace=True)
-            df_merged.fillna(method='ffill', inplace=True)
-            df_merged.fillna(method='bfill', inplace=True)
+        # Actualizar el portafolio según la acción
+        if action == 'Agregar':
+            portfolio[txn_date][ticker] = portfolio[txn_date].get(ticker, 0) + quantity
+        elif action == 'Retirar':
+            portfolio[txn_date][ticker] = portfolio[txn_date].get(ticker, 0) - quantity
 
-            # Crear un DataFrame de transacciones por fecha y ticker
-            portfolio = {}
-            for index, row in df_transactions.iterrows():
-                txn_date = pd.to_datetime(row['Date'])
-                if txn_date not in portfolio:
-                    portfolio[txn_date] = {}
-                action = row['Action']
-                ticker = row['Ticker']
-                quantity = row['Quantity']
-                if action == 'Agregar':
-                    portfolio[txn_date][ticker] = portfolio[txn_date].get(t
+    st.write("Simulación del portafolio completada.")
+    st.json(portfolio)
