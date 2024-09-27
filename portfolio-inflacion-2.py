@@ -48,38 +48,24 @@ def ajustar_precios_por_splits(df, ticker):
   return df
 
 # ------------------------------
-# Función para calcular inflación diaria acumulada dentro de un rango de fechas
-def calcular_inflacion_diaria_rango(df):
-  # Crear una copia de la fecha
+# Función para calcular inflación diaria acumulada
+def calcular_inflacion_diaria(df):
   dates = df['Date']
-  years = dates.dt.year
-  months = dates.dt.month
-
-  daily_inflation = []
-
-  for date_idx, current_date in enumerate(dates):
+  cumulative_inflation = [1.0]
+  for i in range(1, len(dates)):
+      prev_date = dates.iloc[i - 1]
+      current_date = dates.iloc[i]
       year = current_date.year
       month = current_date.month
       if year in inflation_rates:
-          monthly_rate = inflation_rates[year][month -1]
-          # Get number of days in the month
-          num_days = dates[(years == year) & (months == month)].nunique()
-          # Calculate daily rate
-          daily_rate = (1 + monthly_rate / 100) ** (1 / num_days) - 1
-          daily_inflation.append(daily_rate)
-          logger.debug(f"Date: {current_date}, Year: {year}, Month: {month}, Monthly Rate: {monthly_rate}%, Daily Rate: {daily_rate:.6f}")
+          monthly_rate = inflation_rates[year][month - 1]
+          days_in_month = (dates.dt.year == year) & (dates.dt.month == month)
+          num_days_in_month = dates[days_in_month].nunique()
+          daily_rate = (1 + monthly_rate / 100) ** (1 / num_days_in_month) - 1
+          cumulative_inflation.append(cumulative_inflation[-1] * (1 + daily_rate))
       else:
-          # No inflation data, assume no inflation
-          daily_inflation.append(0.0)
-          logger.warning(f"No tasa de inflación para el año {year}. Asumiendo 0% para este día.")
-
-  # Calcular Inflation Index como factor acumulativo
-  cumulative_inflation = []
-  current_cumulative = 1.0
-  for rate in daily_inflation:
-      current_cumulative *= (1 + rate)
-      cumulative_inflation.append(current_cumulative)
-
+          # Si no hay datos de inflación para el año, asumimos 0%
+          cumulative_inflation.append(cumulative_inflation[-1])
   return cumulative_inflation
 
 # ------------------------------
@@ -144,7 +130,6 @@ if submit_button:
 if 'transaction_list' not in st.session_state:
   st.session_state.transaction_list = transaction_list
 else:
-  # Solo actualizar si el usuario ha presionado el botón
   if submit_button:
       st.session_state.transaction_list = transaction_list
 
@@ -185,9 +170,11 @@ else:
           df_merged.sort_values('Date', inplace=True)
           df_merged.fillna(method='ffill', inplace=True)
           df_merged.fillna(method='bfill', inplace=True)
+          df_merged.reset_index(drop=True, inplace=True)
 
           # Crear un DataFrame de transacciones por fecha y ticker
           portfolio_transactions = {}
+          cash_flows = {}
           for index, row in df_transactions.iterrows():
               txn_date = pd.to_datetime(row['Date'])
               if txn_date not in portfolio_transactions:
@@ -195,28 +182,53 @@ else:
               action = row['Action']
               ticker = row['Ticker']
               quantity = row['Quantity']
+              # Obtener precio del ticker en la fecha de transacción
+              price_row = df_merged[df_merged['Date'] == txn_date]
+              if not price_row.empty and ticker in price_row.columns:
+                  price = price_row[ticker].values[0]
+              else:
+                  price = np.nan
+
+              if np.isnan(price):
+                  st.error(f"No se pudo obtener el precio de {ticker} en la fecha {txn_date}.")
+                  st.stop()
+
+              amount = price * quantity
+
+              # Registrar cash flow
+              if txn_date not in cash_flows:
+                  cash_flows[txn_date] = 0.0
+
               if action == 'Agregar':
                   portfolio_transactions[txn_date][ticker] = portfolio_transactions[txn_date].get(ticker, 0) + quantity
+                  cash_flows[txn_date] += amount
               elif action == 'Retirar':
                   portfolio_transactions[txn_date][ticker] = portfolio_transactions[txn_date].get(ticker, 0) - quantity
+                  cash_flows[txn_date] -= amount
 
           # Inicializar holdings
           holdings = {}
           portfolio_values = []
 
-          # Resetear el índice a 'Date' para fácil iteración
-          df_merged.reset_index(drop=True, inplace=True)
           all_dates = df_merged['Date']
 
           # Calcular inflación acumulada
-          cumulative_inflation = calcular_inflacion_diaria_rango(df_merged)
-
-          # Agregar 'Inflacion_Acumulada' al DataFrame
+          cumulative_inflation = calcular_inflacion_diaria(df_merged)
           df_merged['Inflacion_Acumulada'] = cumulative_inflation
+
+          # Crear DataFrame para cash flows
+          df_cash_flows = pd.DataFrame(list(cash_flows.items()), columns=['Date', 'CashFlow'])
+          df_cash_flows.sort_values('Date', inplace=True)
+          df_cash_flows.set_index('Date', inplace=True)
+
+          # Inicializar series para inflación ajustada de cash flows
+          df_cash_flows['Inflacion_Acumulada'] = np.nan
+          df_cash_flows['Inflacion_Ajustada'] = np.nan
 
           # Simular el portafolio y calcular valor diario
           for idx, current_date in df_merged.iterrows():
               date = current_date['Date']
+
               # Actualizar holdings si hay transacciones en esta fecha
               if date in portfolio_transactions:
                   for ticker, qty_change in portfolio_transactions[date].items():
@@ -231,43 +243,42 @@ else:
                       price = df_merged.at[idx, ticker]
                       if not pd.isna(price):
                           total_value += price * qty
+
               portfolio_values.append(total_value)
+
+              # Calcular inflación acumulada para cash flows
+              if date in cash_flows:
+                  idx_cf = df_cash_flows.index.get_loc(date)
+                  # Obtener inflación acumulada hasta la fecha actual
+                  df_cash_flows.at[date, 'Inflacion_Acumulada'] = df_merged.at[idx, 'Inflacion_Acumulada']
+                  # Iniciar Inflación Ajustada con el valor del cash flow
+                  df_cash_flows.at[date, 'Inflacion_Ajustada'] = cash_flows[date]
+
+          # Calcular valor acumulado ajustado por inflación de los cash flows
+          df_cash_flows['Valor_Ajustado'] = df_cash_flows.apply(
+              lambda row: row['Inflacion_Ajustada'] * (df_merged['Inflacion_Acumulada'].iloc[-1] / row['Inflacion_Acumulada']),
+              axis=1
+          )
+
+          # Sumar todos los valores ajustados
+          total_inflation_adjusted_investment = df_cash_flows['Valor_Ajustado'].sum()
 
           # Agregar 'Portfolio_Value' al DataFrame
           df_merged['Portfolio_Value'] = portfolio_values
-
-          # Calcular 'Inflacion_Index' starting at first investment date
-          first_investment_idx = df_merged[df_merged['Portfolio_Value'] > 0].index.min()
-          if pd.isna(first_investment_idx):
-              st.warning("No hay ninguna transacción que agregue holdings.")
-              st.stop()
-
-          # Set 'Inflacion_Index' to start at 1 on first investment date
-          df_merged['Inflacion_Index'] = np.nan
-          df_merged.at[first_investment_idx, 'Inflacion_Index'] = 1.0
-
-          # Calculate 'Inflacion_Index' from first_investment_idx onwards
-          for idx in range(first_investment_idx + 1, len(df_merged)):
-              previous_inflation = df_merged.at[idx - 1, 'Inflacion_Index']
-              # Inflación relativa al día anterior
-              daily_inflation = df_merged.at[idx, 'Inflacion_Acumulada'] / df_merged.at[idx - 1, 'Inflacion_Acumulada']
-              df_merged.at[idx, 'Inflacion_Index'] = previous_inflation * daily_inflation
-
-          # Escalar 'Inflacion_Index' para que coincida con el valor inicial del portafolio
-          initial_portfolio_value = df_merged.at[first_investment_idx, 'Portfolio_Value']
-          df_merged['Inflacion_Index'] = df_merged['Inflacion_Index'] * initial_portfolio_value
 
           # Plotting con Plotly
           fig = go.Figure()
           # Portfolio_Value
           fig.add_trace(go.Scatter(x=df_merged['Date'], y=df_merged['Portfolio_Value'],
                                    name='Portafolio', mode='lines', line=dict(color='blue')))
-          # Inflacion_Index, scaled to initial portfolio value
-          fig.add_trace(go.Scatter(x=df_merged['Date'], y=df_merged['Inflacion_Index'],
-                                   name='Inflación', mode='lines', line=dict(color='red', dash='dash')))
+          # Línea horizontal del valor ajustado por inflación
+          fig.add_trace(go.Scatter(x=[df_merged['Date'].iloc[0], df_merged['Date'].iloc[-1]],
+                                   y=[total_inflation_adjusted_investment, total_inflation_adjusted_investment],
+                                   name='Inversión Ajustada por Inflación',
+                                   mode='lines', line=dict(color='red', dash='dash')))
 
           fig.update_layout(
-              title='Valor del Portafolio vs Inflación Acumulada',
+              title='Valor del Portafolio vs Inversión Ajustada por Inflación',
               xaxis_title='Fecha',
               yaxis_title='Valor (ARS)',
               height=600,
@@ -284,13 +295,11 @@ else:
 
           # Análisis final
           final_portfolio = df_merged['Portfolio_Value'].iloc[-1]
-          final_inflation = df_merged['Inflacion_Index'].iloc[-1]
-          difference = final_portfolio - final_inflation
+          difference = final_portfolio - total_inflation_adjusted_investment
 
-          st.markdown(f"**Valor Inicial del Portafolio:** {initial_portfolio_value:.2f} ARS")
           st.markdown(f"**Valor Final del Portafolio:** {final_portfolio:.2f} ARS")
-          st.markdown(f"**Valor Final Ajustado por Inflación:** {final_inflation:.2f} ARS")
-          st.markdown(f"**Diferencia (Portafolio - Inflación):** {difference:.2f} ARS")
+          st.markdown(f"**Valor Total Ajustado por Inflación de las Inversiones:** {total_inflation_adjusted_investment:.2f} ARS")
+          st.markdown(f"**Diferencia (Portafolio - Inversión Ajustada):** {difference:.2f} ARS")
           if difference > 0:
               st.success("¡El portafolio se mantuvo por encima de la inflación!")
           else:
